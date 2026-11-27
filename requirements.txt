@@ -1,0 +1,4 @@
+panda3d
+numpy
+cairosvg
+python-xlib
