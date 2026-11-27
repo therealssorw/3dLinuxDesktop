@@ -37,10 +37,11 @@ If something goes wrong, the log is `~/.local/share/shipdesk/shipdesk.log`.
   type (documents blue, images green, video purple, audio orange, code teal, archives brown,
   3D pink). Look at a sign and press E to walk into that folder. The kiosk in front has
   UP, HOME and NEXT (more racks when a folder has over 20 sections).
-- **App stations** (along the big window): the apps pinned to your KDE taskbar, in the same
-  order, as floating logos (up to ten). E opens one. Pin or unpin apps on the taskbar and the
-  stations follow the next time ShipDesk starts. To pick them by hand instead, set
-  `"stations": "custom"` in the config file; then F on a station swaps its app.
+- **App stations** (along the big window): floating app logos. First the apps you pinned
+  (Firefox and Konsole to start with), then the apps pinned to your KDE taskbar, then a **+**
+  station. E opens an app. The + station lists every installed app: Enter opens one, and
+  Right arrow / Square pins it to the stations (or unpins it). F on a pinned station unpins it.
+  To pick every station by hand instead, set `"stations": "custom"` in the config file.
 - **Core consoles** (around the glowing core) or Tab: the full list of installed apps.
 - Opening a file or app drops you to the normal 2D desktop with that window in front.
 

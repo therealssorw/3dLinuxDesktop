@@ -69,6 +69,19 @@ def _parse(path, app_id, allow_hidden=False):
     return App(app_id, name, exe, s.get("Icon", ""), s.get("Terminal", "false").lower() == "true", path)
 
 
+def match_app(apps, want):
+    """Find an installed app by a loose name such as 'firefox' (covers snap and flatpak ids)."""
+    want = want.lower()
+    for a in apps:
+        low = a.id.lower()
+        if low == want or low.endswith("." + want) or low.startswith(want + "_") or low == "org.kde." + want:
+            return a
+    for a in apps:
+        if a.name.lower() == want or a.name.lower().startswith(want + " "):
+            return a
+    return None
+
+
 def default_pins(apps, count):
     """Pick a sensible first set of apps for the stations."""
     by_id = {a.id: a for a in apps}

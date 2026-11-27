@@ -419,44 +419,75 @@ class ShipDesk(ShowBase):
 
     # ------------------------------------------------------------ app stations
     def build_pods(self):
-        slots = self.markers["winscreens"]
-        pins = [p for p in self.state.get("pins", []) if p is None or p in self.apps_by_id]
-        self.taskbar_mode = False
-        if self.conf.get("stations", "taskbar") == "taskbar":
-            try:
-                bar = desktop.taskbar_apps()
-            except Exception:
-                traceback.print_exc(); bar = []
-            if bar:
-                self.taskbar_mode = True
-                for a in bar:
-                    self.apps_by_id.setdefault(a.id, a)
-                ids = [a.id for a in bar[:len(slots)]]
-                lead = (len(slots) - len(ids)) // 2          # keep a short row centred on the window
-                pins = [None] * lead + ids + [None] * (len(slots) - len(ids) - lead)
-                self.state["pins"] = pins
-        if len(pins) != len(slots):
-            pins = desktop.default_pins(self.apps, len(slots))
-            pins += [None] * (len(slots) - len(pins))
-            self.state["pins"] = pins
-        for i, (mn, mx) in enumerate(slots):
+        for i, (mn, mx) in enumerate(self.markers["winscreens"]):
             x = (mn[0] + mx[0]) / 2
             root = self.unlit_root.attachNewNode(f"pod{i}"); root.setPos(x, 29.05, 1.62)
             base = self.box.copyTo(self.unlit_root); base.setPos(x, 29.28, 0.93); base.setScale(1.0, 0.36, 0.05)
-            pod = {"i": i, "root": root, "base": base, "phase": i * 0.7, "card": None, "label": None, "item": None}
+            pod = {"i": i, "root": root, "base": base, "phase": i * 0.7, "card": None, "label": None, "item": None, "source": None}
             pod["item"] = self.add_item("app", (x, 29.05, 1.62), 0.75, "", "", data=pod, reach=5.0)
             self.pods.append(pod)
-            self.set_pod(i, pins[i])
+        self.taskbar_mode = self.conf.get("stations", "taskbar") == "taskbar"
+        self.bar_apps = []
+        if self.taskbar_mode:
+            try:
+                self.bar_apps = desktop.taskbar_apps()
+            except Exception:
+                traceback.print_exc()
+            for a in self.bar_apps:
+                self.apps_by_id.setdefault(a.id, a)
+            if "extra_pins" not in self.state:          # first run: Firefox and Konsole are always there
+                self.state["extra_pins"] = [a.id for a in (desktop.match_app(self.apps, w) for w in ("firefox", "konsole")) if a]
+        self.layout_stations()
 
-    def set_pod(self, i, app_id):
+    def layout_stations(self):
+        """Decide which app sits on which station, then draw them."""
+        n = len(self.pods)
+        if not self.taskbar_mode:                        # "custom": every station is picked by hand with F
+            pins = [p for p in self.state.get("pins", []) if p is None or p in self.apps_by_id]
+            if len(pins) != n or "+" in pins:
+                pins = desktop.default_pins(self.apps, n); pins += [None] * (n - len(pins))
+            self.state["pins"] = [None] * n
+            for i in range(n):
+                self.set_pod(i, pins[i], "custom")
+            return
+        row = []                                         # (app id, where it came from)
+        extra = [p for p in self.state.get("extra_pins", []) if p in self.apps_by_id]
+        self.state["extra_pins"] = extra
+        for p in extra:
+            row.append((p, "pin"))
+        for a in self.bar_apps:
+            if a.id not in [r[0] for r in row]:
+                row.append((a.id, "bar"))
+        if not row:
+            row = [(p, "bar") for p in desktop.default_pins(self.apps, n - 1)]
+        row = row[:n - 1] + [("+", "plus")]
+        lead = (n - len(row)) // 2                       # keep a short row centred on the window
+        self.state["pins"] = [None] * n
+        for i in range(n):
+            j = i - lead
+            if 0 <= j < len(row):
+                self.set_pod(i, row[j][0], row[j][1])
+            else:
+                self.set_pod(i, None, None)
+
+    def set_pod(self, i, app_id, source="custom"):
         pod = self.pods[i]
+        pod["source"] = source
+        pod["root"].show(); pod["base"].show(); pod["item"]["reach"] = 5.0
         for k in ("card", "label", "frame"):
             if pod.get(k): pod[k].removeNode(); pod[k] = None
         app = self.apps_by_id.get(app_id) if app_id else None
-        self.state["pins"][i] = app.id if app else None
+        self.state["pins"][i] = app.id if app else ("+" if app_id == "+" else None)
         cm = CardMaker("icon"); cm.setFrame(-0.42, 0.42, -0.42, 0.42)
         tint = (0.2, 0.75, 0.9)
-        if app:
+        if app_id == "+":
+            tint = (1.0, 0.8, 0.35)
+            card = pod["root"].attachNewNode(cm.generate()); card.setTwoSided(True)
+            card.setTransparency(TransparencyAttrib.MAlpha); card.setColor(0.1, 0.07, 0.02, 0.85)
+            plus = self.text3d("+", 0.75, (1, 0.85, 0.5, 1), None, card, billboard=False); plus.setPos(0, -0.01, -0.2)
+            pod["card"] = card
+            name = "More apps"; hint = "choose any app"
+        elif app:
             tex, tint = self.icon_texture(app)
             card = pod["root"].attachNewNode(cm.generate()); card.setTwoSided(True)
             card.setTransparency(TransparencyAttrib.MAlpha)
@@ -471,16 +502,16 @@ class ShipDesk(ShowBase):
             hint = "open"
         else:
             name = "empty station"; hint = None
-            if getattr(self, "taskbar_mode", False):
+            if source != "custom":
                 pod["root"].hide(); pod["base"].hide()
         fm = CardMaker("frame"); fm.setFrame(-0.52, 0.52, -0.52, 0.52)
         frame = pod["root"].attachNewNode(fm.generate()); frame.setY(0.03); frame.setTwoSided(True)
-        frame.setTransparency(TransparencyAttrib.MAlpha); frame.setColor(tint[0], tint[1], tint[2], 0.22 if app else 0.08)
+        frame.setTransparency(TransparencyAttrib.MAlpha); frame.setColor(tint[0], tint[1], tint[2], 0.22 if (app or app_id == "+") else 0.08)
         pod["frame"] = frame
         pod["base"].setColor(min(1, tint[0] + 0.15), min(1, tint[1] + 0.15), min(1, tint[2] + 0.15), 1)
         label = self.text3d(name if len(name) < 22 else name[:20] + "…", 0.13, parent=self.unlit_root, billboard=False)
         label.setPos(pod["root"].getX(), 29.1, 1.02)
-        if not app and getattr(self, "taskbar_mode", False):
+        if not app and app_id != "+" and source != "custom":
             label.hide(); pod["item"]["reach"] = 0
         pod["label"] = label
         pod["item"]["label"] = name
@@ -689,7 +720,7 @@ class ShipDesk(ShowBase):
                           "F / Square   pick up or throw a book  -  on an app station: change the app\n"
                           "R   put a loose book back on its shelf\n"
                           "Q / Circle   up one folder (in the library)\n"
-                          "Tab / Triangle   all apps\n"
+                          "Tab / Triangle   all apps (also the + station): Enter opens, Right arrow / Square pins\n"
                           "Esc / Options   normal 2D desktop (Ctrl+Alt+B from anywhere)        F10   quit\n"
                           "On the 2D desktop: left stick pointer, Cross click, Circle right click,\n"
                           "right stick scroll, D-pad arrows, Square Enter, Triangle Esc, PS button back to the ship\n"
@@ -718,7 +749,8 @@ class ShipDesk(ShowBase):
             self.toast("No installed apps were found."); self.play("deny"); return
         self.mode = "menu"; self.menu_target = target_pod
         self.menu_title.setText("ALL APPS" if target_pod is None else f"CHOOSE AN APP FOR STATION {target_pod + 1}")
-        self.menu_foot.setText("Up/Down or D-pad: move     Enter / Cross: " + ("launch" if target_pod is None else "put it here") +
+        self.menu_foot.setText("Up/Down or D-pad: move     Enter / Cross: " + ("open" if target_pod is None else "put it here") +
+                               ("     Right arrow / Square: pin or unpin (*)" if target_pod is None and self.taskbar_mode else "") +
                                "     type a letter: jump     Esc / Circle: close")
         self.menu_root.show(); self.hud_focus.setText(""); self.hud_hint.setText(""); self.refresh_menu(); self.play("open")
 
@@ -732,7 +764,8 @@ class ShipDesk(ShowBase):
             j = top + i
             if j < n:
                 sel = j == self.menu_sel
-                row.setText(("> " if sel else "   ") + self.apps[j].name[:44])
+                star = " *" if self.apps[j].id in self.state.get("extra_pins", []) else ""
+                row.setText(("> " if sel else "   ") + self.apps[j].name[:44] + star)
                 row.setFg((1, 0.85, 0.5, 1) if sel else (0.85, 0.92, 1, 0.9))
             else:
                 row.setText("")
@@ -753,6 +786,22 @@ class ShipDesk(ShowBase):
         else:
             self.set_pod(target, app.id); self.play("dock"); self.save()
             self.toast(f"Station {target + 1} is now {app.name}.")
+
+    def toggle_pin(self, app_id):
+        app = self.apps_by_id.get(app_id)
+        if not app or not self.taskbar_mode:
+            self.play("deny"); return
+        extra = self.state.setdefault("extra_pins", [])
+        if app_id in extra:
+            extra.remove(app_id); self.toast(f"Unpinned {app.name}.")
+        else:
+            taken = len(extra) + len([a for a in self.bar_apps if a.id not in extra])
+            if taken >= len(self.pods) - 1:
+                self.toast("The stations are full. Unpin something first."); self.play("deny"); return
+            extra.append(app_id); self.toast(f"Pinned {app.name} to the stations.")
+        self.layout_stations(); self.play("dock"); self.save()
+        if self.mode == "menu":
+            self.refresh_menu()
 
     def on_keystroke(self, ch):
         if self.mode != "menu" or not ch.isalnum():
@@ -966,8 +1015,10 @@ class ShipDesk(ShowBase):
             hint = "E open    F pick up" + ("    R reshelve" if k == "loose" else "")
             return f"{it['label']}   ({size:.0f} {unit})", hint
         if k == "app":
-            if self.taskbar_mode:
-                return it["label"], "E open"
+            src = it["data"]["source"]
+            if src == "plus": return it["label"], "E choose any app to open or pin"
+            if src == "pin": return it["label"], "E open    F unpin"
+            if src == "bar": return it["label"], "E open"
             return it["label"], ("E open    F change app" if it["hint"] else "F choose an app")
         return it["label"], "E " + it["hint"]
 
@@ -977,7 +1028,8 @@ class ShipDesk(ShowBase):
         elif k == "folder": self.enter_folder(it["data"])
         elif k == "app":
             app = self.apps_by_id.get(self.state["pins"][it["data"]["i"]] or "")
-            if app: self.launch(app)
+            if it["data"]["source"] == "plus": self.open_menu(None)
+            elif app: self.launch(app)
             elif not self.taskbar_mode: self.open_menu(it["data"]["i"])
         elif k == "console": self.open_menu(None)
         elif k == "lib_up": self.folder_up()
@@ -994,8 +1046,13 @@ class ShipDesk(ShowBase):
         if it is None:
             return
         if it["kind"] == "app":
-            if self.taskbar_mode:
-                self.toast("These stations follow your KDE taskbar. Pin or unpin apps there."); self.play("deny")
+            src = it["data"]["source"]
+            if src == "plus":
+                self.open_menu(None)
+            elif src == "pin":
+                self.toggle_pin(self.state["pins"][it["data"]["i"]])
+            elif src == "bar":
+                self.toast("This one comes from your KDE taskbar. Unpin it there to remove it."); self.play("deny")
             else:
                 self.open_menu(it["data"]["i"])
             return
@@ -1148,6 +1205,8 @@ class ShipDesk(ShowBase):
             self.menu_sel = max(0, min(len(self.apps) - 1, self.menu_sel + move)); self.refresh_menu(); self.play("focus")
         if self.key_hit("enter") or self.pad_hit(self.conf["pad"]["interact"]):
             self.menu_pick()
+        elif (self.key_hit("arrow_right") or self.pad_hit(self.conf["pad"]["grab"])) and self.menu_target is None:
+            self.toggle_pin(self.apps[self.menu_sel].id)
         elif self.key_hit("escape") or self.pad_hit(self.conf["pad"]["back"]) or self.key_hit("tab"):
             self.close_menu()
 
@@ -1333,6 +1392,15 @@ class ShipDesk(ShowBase):
         def walk_off(task):
             self.auto_walk = 0; print("walked to", self.char_np.getPos(), "(deck step is 0.3 high, sofa blocks at y~21.5)", flush=True); return task.done
         steps.append(walk_on); steps.extend([lambda t: t.done] * 3); steps.append(walk_off)
+        def pins(task):
+            print("stations", [(p["source"], self.state["pins"][p["i"]]) for p in self.pods if p["source"]], flush=True)
+            if self.taskbar_mode:
+                self.open_menu(None); self.menu_sel = next(i for i, a in enumerate(self.apps) if a.id not in self.state["pins"])
+                picked = self.apps[self.menu_sel].id; self.toggle_pin(picked); self.close_menu()
+                print("after pin", [self.state["pins"][p["i"]] for p in self.pods], flush=True)
+                self.toggle_pin(picked); print("after unpin", self.state["extra_pins"], flush=True)
+            return task.done
+        steps.append(pins)
         def finish(task):
             self.save(); print("items", len(self.items), "apps", len(self.apps), "pins", self.state["pins"], flush=True)
             self.userExit(); return task.done
