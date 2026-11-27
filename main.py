@@ -4,7 +4,7 @@
 Files are books in the library racks, folders are rack sections, apps are stations
 along the big window. Opening anything drops you to the normal 2D desktop.
 """
-import os, sys, json, math, time, signal, hashlib, argparse, colorsys
+import os, sys, json, math, time, signal, hashlib, argparse, colorsys, shutil, subprocess, traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -16,10 +16,32 @@ from panda3d.core import (loadPrcFileData, WindowProperties, GeomVertexFormat, G
                           Filename, BitMask32, InputDevice, GamepadButton, KeyboardButton, ClockObject,
                           AntialiasAttrib, TransformState, SamplerState)
 
+def _start_log():
+    """When not run from a terminal, keep everything ShipDesk prints in a log file."""
+    try:
+        if sys.stdout.isatty():
+            return
+        d = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local/share")), "shipdesk")
+        os.makedirs(d, exist_ok=True)
+        log = os.path.join(d, "shipdesk.log")
+        if os.path.exists(log):
+            os.replace(log, log + ".old")
+        fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        os.dup2(fd, 1); os.dup2(fd, 2)
+        sys.stdout = os.fdopen(1, "w", buffering=1); sys.stderr = os.fdopen(2, "w", buffering=1)
+        print("ShipDesk starting", time.strftime("%Y-%m-%d %H:%M:%S"), "python", sys.version.split()[0],
+              "session", os.environ.get("XDG_SESSION_TYPE"), flush=True)
+    except Exception:
+        pass
+
+
 ap = argparse.ArgumentParser()
 ap.add_argument("--windowed", action="store_true", help="run in a window instead of fullscreen")
 ap.add_argument("--selftest", metavar="DIR", help="render test screenshots into DIR and exit")
+ap.add_argument("--restore-panel", action="store_true", help="put the KDE panel back the way it was and exit")
 ARGS = ap.parse_args()
+if not ARGS.selftest and not ARGS.restore_panel:
+    _start_log()
 
 loadPrcFileData("", """
 window-title ShipDesk
@@ -56,6 +78,7 @@ DEFAULT_CONF = {
     "walk_speed": 4.2,
     "run_speed": 9.5,             # sprint speed
     "start_on_login": True,
+    "hide_panel_on_desktop": True,  # tuck the KDE panel away (auto-hide) while ShipDesk is running
     "stations": "taskbar",        # "taskbar" = the apps pinned to your KDE panel; "custom" = pick each one with F
     "voice_model": "base",        # speech model: tiny, base, small (bigger = slower, more accurate)
     "voice_language": "",         # "" = work it out; or a code like "en" or "ja"       # open ShipDesk automatically when you log in to KDE
@@ -111,6 +134,31 @@ def save_json(path, data):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=1)
     os.replace(tmp, path)
+
+
+def plasma_script(js):
+    """Run a snippet in the Plasma shell. Returns its printed output, or None if that is not possible."""
+    for tool in ("qdbus6", "qdbus", "qdbus-qt6", "qdbus-qt5"):
+        exe = shutil.which(tool)
+        if not exe:
+            continue
+        try:
+            r = subprocess.run([exe, "org.kde.plasmashell", "/PlasmaShell", "org.kde.PlasmaShell.evaluateScript", js],
+                               capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                return r.stdout
+            print("ShipDesk: panel script failed:", r.stderr.strip()[:200], flush=True)
+        except Exception as e:
+            print("ShipDesk: panel script failed:", e, flush=True)
+    return None
+
+
+def restore_panel_modes(modes):
+    if not modes:
+        return False
+    js = "".join('try { panelById(%d).hiding = "%s"; } catch (e) {}' % (int(k), v)
+                 for k, v in modes.items() if str(k).isdigit() and v in ("none", "autohide", "dodgewindows", "windowsgobelow"))
+    return plasma_script(js) is not None
 
 
 def tri_node(arr, name):
@@ -239,6 +287,7 @@ class ShipDesk(ShowBase):
             pass
 
         self.sync_autostart()
+        self.hide_panel()
         self.grab_mouse(True)
         self.taskMgr.add(self.update, "update")
         self.toast("Welcome aboard.  H shows the controls.", 6)
@@ -374,7 +423,10 @@ class ShipDesk(ShowBase):
         pins = [p for p in self.state.get("pins", []) if p is None or p in self.apps_by_id]
         self.taskbar_mode = False
         if self.conf.get("stations", "taskbar") == "taskbar":
-            bar = desktop.taskbar_apps()
+            try:
+                bar = desktop.taskbar_apps()
+            except Exception:
+                traceback.print_exc(); bar = []
             if bar:
                 self.taskbar_mode = True
                 for a in bar:
@@ -978,6 +1030,19 @@ class ShipDesk(ShowBase):
 
     # ------------------------------------------------------------ frame update
     def update(self, task):
+        try:
+            return self.update_inner(task)
+        except SystemExit:
+            raise
+        except Exception:
+            self.errors = getattr(self, "errors", 0) + 1
+            if self.errors <= 5:
+                traceback.print_exc(); sys.stderr.flush()
+            if self.errors > 300:
+                print("ShipDesk: too many errors, quitting", flush=True); self.quit()
+            return task.cont
+
+    def update_inner(self, task):
         dt = min(ClockObject.getGlobalClock().getDt(), 0.05)
         if self.quit_flag:
             self.quit()
@@ -1118,6 +1183,29 @@ class ShipDesk(ShowBase):
             print("ShipDesk: controller pointer stopped:", e, flush=True)
             self.mouse_backend = None; self.mouse_errors = [str(e)]
 
+    # ------------------------------------------------------------ KDE panel
+    def hide_panel(self):
+        """Switch every KDE panel to auto-hide, remembering how each was set."""
+        if self.selftest or not self.conf.get("hide_panel_on_desktop", True):
+            return
+        out = plasma_script('var o=[]; panels().forEach(function(p){ o.push(p.id + ":" + p.hiding); p.hiding = "autohide"; }); print(o.join(","));')
+        if out is None:
+            return
+        if not self.state.get("panel_modes"):          # keep the first, real answer even after a crash
+            modes = {}
+            for part in out.strip().split(","):
+                pid, _, mode = part.partition(":")
+                if pid.strip().isdigit() and mode:
+                    modes[pid.strip()] = mode.strip()
+            if modes:
+                self.state["panel_modes"] = modes
+                try: save_json(os.path.join(DATA_DIR, "state.json"), self.state)
+                except Exception: pass
+
+    def restore_panel(self):
+        if restore_panel_modes(self.state.get("panel_modes")):
+            self.state["panel_modes"] = {}
+
     # ------------------------------------------------------------ voice typing
     def ensure_backend(self):
         if self.mouse_backend is None and not self.mouse_errors:
@@ -1193,6 +1281,8 @@ class ShipDesk(ShowBase):
             print("ShipDesk: could not save state:", e, flush=True)
 
     def quit(self):
+        try: self.restore_panel()
+        except Exception: traceback.print_exc()
         self.save()
         if self.mouse_backend:
             self.mouse_backend.close()
@@ -1252,4 +1342,17 @@ class ShipDesk(ShowBase):
 
 
 if __name__ == "__main__":
-    ShipDesk().run()
+    if ARGS.restore_panel:
+        st = load_json(os.path.join(DATA_DIR, "state.json"), {})
+        if restore_panel_modes(st.get("panel_modes")):
+            st["panel_modes"] = {}; save_json(os.path.join(DATA_DIR, "state.json"), st); print("KDE panel restored.")
+        else:
+            print("Nothing to restore (or the Plasma shell could not be reached).")
+        sys.exit(0)
+    try:
+        ShipDesk().run()
+    except SystemExit:
+        raise
+    except Exception:
+        traceback.print_exc(); sys.stderr.flush()
+        raise

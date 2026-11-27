@@ -23,6 +23,13 @@ System Settings > Shortcuts > Add New > Application > "ShipDesk toggle".
 ShipDesk opens by itself when you log in. To stop that, set `"start_on_login": false` in
 `~/.config/shipdesk/config.json` and start it once more.
 
+While ShipDesk is running, the KDE panel is switched to auto-hide so the 2D desktop is just
+your window; move the pointer to the panel's edge to bring it up. Quitting ShipDesk (F10) puts
+the panel back. `shipdesk --restore-panel` does the same by hand, and
+`"hide_panel_on_desktop": false` in the config turns this off.
+
+If something goes wrong, the log is `~/.local/share/shipdesk/shipdesk.log`.
+
 ## What is where
 
 - **Library** (the racks beside the core): the folder you are in. Loose files sit on the first
