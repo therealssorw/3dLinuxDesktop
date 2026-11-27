@@ -50,7 +50,7 @@ def list_apps():
     return sorted(apps.values(), key=lambda a: a.name.lower())
 
 
-def _parse(path, app_id):
+def _parse(path, app_id, allow_hidden=False):
     cp = configparser.RawConfigParser(strict=False, interpolation=None)
     cp.optionxform = str
     try:
@@ -60,7 +60,7 @@ def _parse(path, app_id):
         return None
     if s.get("Type", "Application") != "Application":
         return None
-    if s.get("NoDisplay", "false").lower() == "true" or s.get("Hidden", "false").lower() == "true":
+    if not allow_hidden and (s.get("NoDisplay", "false").lower() == "true" or s.get("Hidden", "false").lower() == "true"):
         return None
     exe = s.get("Exec")
     name = s.get("Name")
@@ -213,3 +213,71 @@ def _svg_to_png(src, size=256):
         except Exception:
             pass
     return None
+
+
+# ---------------------------------------------------------------- KDE taskbar
+def find_app(app_id):
+    """Look an app up by desktop id, including ones hidden from the menu."""
+    app_id = app_id[:-8] if app_id.endswith(".desktop") else app_id
+    for d in APP_DIRS:
+        if not os.path.isdir(d):
+            continue
+        direct = os.path.join(d, app_id + ".desktop")
+        paths = [direct] if os.path.exists(direct) else []
+        if not paths:
+            for root, _dirs, files in os.walk(d):
+                if app_id + ".desktop" in files:
+                    paths.append(os.path.join(root, app_id + ".desktop")); break
+        for p in paths:
+            app = _parse(p, app_id, allow_hidden=True)
+            if app:
+                return app
+    return None
+
+
+def _query(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=4).stdout.strip()
+    except Exception:
+        return ""
+
+
+def _preferred(kind):
+    if kind == "browser":
+        return _query(["xdg-settings", "get", "default-web-browser"])
+    if kind == "filemanager":
+        return _query(["xdg-mime", "query", "default", "inode/directory"]) or "org.kde.dolphin.desktop"
+    if kind == "mailer":
+        return _query(["xdg-mime", "query", "default", "x-scheme-handler/mailto"])
+    if kind == "terminal":
+        return "org.kde.konsole.desktop"
+    return ""
+
+
+def taskbar_apps():
+    """Apps pinned to the KDE panel's task manager, in panel order."""
+    conf = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")),
+                        "plasma-org.kde.plasma.desktop-appletsrc")
+    try:
+        lines = open(conf, encoding="utf-8", errors="replace").read().splitlines()
+    except OSError:
+        return []
+    out, seen = [], set()
+    for line in lines:
+        if not line.startswith("launchers="):
+            continue
+        for entry in line[len("launchers="):].split(","):
+            entry = entry.strip()
+            entry = re.sub(r"^\[[^\]]*\](\\n)?", "", entry)      # drop an activity prefix
+            app = None
+            if entry.startswith("applications:"):
+                app = find_app(entry[len("applications:"):])
+            elif entry.startswith("preferred://"):
+                target = _preferred(entry[len("preferred://"):])
+                app = find_app(target) if target else None
+            elif entry.startswith("file://") and entry.endswith(".desktop"):
+                path = entry[len("file://"):]
+                app = _parse(path, os.path.basename(path)[:-8], allow_hidden=True)
+            if app and app.id not in seen:
+                seen.add(app.id); out.append(app)
+    return out

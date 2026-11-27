@@ -12,7 +12,7 @@ EV_SYN, EV_KEY, EV_REL = 0, 1, 2
 REL_X, REL_Y, REL_HWHEEL, REL_WHEEL = 0, 1, 6, 8
 BTN_LEFT, BTN_RIGHT, BTN_MIDDLE = 0x110, 0x111, 0x112
 KEYS = {"esc": 1, "tab": 15, "enter": 28, "space": 57, "up": 103, "left": 105, "right": 106,
-        "down": 108, "meta": 125, "backspace": 14}
+        "down": 108, "meta": 125, "backspace": 14, "ctrl": 29, "shift": 42, "v": 47}
 UI_SET_EVBIT, UI_SET_KEYBIT, UI_SET_RELBIT = 0x40045564, 0x40045565, 0x40045566
 UI_DEV_SETUP, UI_DEV_CREATE, UI_DEV_DESTROY = 0x405C5503, 0x5501, 0x5502
 
@@ -66,7 +66,8 @@ class UInput:
 class XTest:
     name = "xtest"
     KEYSYM = {"esc": 0xFF1B, "tab": 0xFF09, "enter": 0xFF0D, "space": 0x20, "up": 0xFF52, "left": 0xFF51,
-              "right": 0xFF53, "down": 0xFF54, "meta": 0xFFEB, "backspace": 0xFF08}
+              "right": 0xFF53, "down": 0xFF54, "meta": 0xFFEB, "backspace": 0xFF08,
+              "ctrl": 0xFFE3, "shift": 0xFFE1, "v": 0x76}
 
     def __init__(self):
         if os.environ.get("XDG_SESSION_TYPE", "x11") == "wayland":

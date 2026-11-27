@@ -11,7 +11,7 @@ APPS="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 SHORTCUT="Ctrl+Alt+B"
 
 if [[ "${1:-}" == "--uninstall" ]]; then
-  rm -rf "$DATA/app" "$VENV" "$DATA/requirements.stamp" "$BIN/shipdesk" "$BIN/shipdesk-toggle" "$APPS/shipdesk.desktop" "$APPS/shipdesk-toggle.desktop"
+  rm -rf "$DATA/app" "$VENV" "$DATA/requirements.stamp" "$BIN/shipdesk" "$BIN/shipdesk-toggle" "$BIN/shipdesk-dictate" "$APPS/shipdesk-dictate.desktop" "$APPS/shipdesk.desktop" "$APPS/shipdesk-toggle.desktop" "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/shipdesk.desktop"
   echo "ShipDesk removed (this folder, $SRC, is left alone). Your saved layout is still in $DATA/state.json; delete that folder to forget it."
   echo "If the $SHORTCUT shortcut is still listed, remove it in System Settings > Shortcuts."
   exit 0
@@ -55,7 +55,17 @@ else
   exec "$BIN/shipdesk"
 fi
 TOGGLE
-chmod +x "$BIN/shipdesk" "$BIN/shipdesk-toggle"
+cat > "$BIN/shipdesk-dictate" <<DICT
+#!/bin/sh
+# Ctrl+Alt+V: start or stop voice typing (ShipDesk must be running; it can be minimised).
+PIDF="\${XDG_RUNTIME_DIR:-/tmp}/shipdesk.pid"
+if [ -f "\$PIDF" ] && kill -0 "\$(cat "\$PIDF")" 2>/dev/null; then
+  kill -USR2 "\$(cat "\$PIDF")"
+else
+  notify-send -a ShipDesk "ShipDesk voice typing" "Start ShipDesk first (Ctrl+Alt+B)." 2>/dev/null || true
+fi
+DICT
+chmod +x "$BIN/shipdesk" "$BIN/shipdesk-toggle" "$BIN/shipdesk-dictate"
 
 cat > "$APPS/shipdesk.desktop" <<DESK
 [Desktop Entry]
@@ -78,17 +88,43 @@ NoDisplay=true
 Terminal=false
 X-KDE-Shortcuts=$SHORTCUT
 DESK
+cat > "$APPS/shipdesk-dictate.desktop" <<DESK
+[Desktop Entry]
+Type=Application
+Name=ShipDesk voice typing
+Comment=Start or stop voice typing
+Exec=$BIN/shipdesk-dictate
+Icon=audio-input-microphone
+NoDisplay=true
+Terminal=false
+X-KDE-Shortcuts=Ctrl+Alt+V
+DESK
+echo "==> Making ShipDesk start when you log in"
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
+cat > "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/shipdesk.desktop" <<DESK
+[Desktop Entry]
+Type=Application
+Name=ShipDesk
+Comment=Start in the ship
+Exec=$BIN/shipdesk
+Icon=applications-games
+Terminal=false
+X-KDE-autostart-after=panel
+DESK
 command -v update-desktop-database >/dev/null && update-desktop-database "$APPS" 2>/dev/null || true
 
 echo "==> Registering the $SHORTCUT shortcut with KDE"
 REGISTERED=no
 if command -v kwriteconfig6 >/dev/null; then
   kwriteconfig6 --file kglobalshortcutsrc --group services --group shipdesk-toggle.desktop --key _launch "$SHORTCUT" && REGISTERED=yes
+  kwriteconfig6 --file kglobalshortcutsrc --group services --group shipdesk-dictate.desktop --key _launch "Ctrl+Alt+V" || true
   command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 >/dev/null 2>&1 || true
   systemctl --user restart plasma-kglobalaccel.service >/dev/null 2>&1 || true
 elif command -v kwriteconfig5 >/dev/null; then
   kwriteconfig5 --file kglobalshortcutsrc --group shipdesk-toggle.desktop --key _k_friendly_name "ShipDesk toggle"
   kwriteconfig5 --file kglobalshortcutsrc --group shipdesk-toggle.desktop --key _launch "$SHORTCUT,none,ShipDesk toggle" && REGISTERED=yes
+  kwriteconfig5 --file kglobalshortcutsrc --group shipdesk-dictate.desktop --key _k_friendly_name "ShipDesk voice typing"
+  kwriteconfig5 --file kglobalshortcutsrc --group shipdesk-dictate.desktop --key _launch "Ctrl+Alt+V,none,ShipDesk voice typing" || true
   command -v kbuildsycoca5 >/dev/null && kbuildsycoca5 >/dev/null 2>&1 || true
   if command -v kquitapp5 >/dev/null && command -v kglobalaccel5 >/dev/null; then
     kquitapp5 kglobalaccel >/dev/null 2>&1 || true; sleep 1; (kglobalaccel5 >/dev/null 2>&1 &)
@@ -100,6 +136,7 @@ else
   echo "   Could not find KDE's config tool. Set it by hand:"
 fi
 echo "   System Settings > Shortcuts > Add New > Application > 'ShipDesk toggle' > add shortcut $SHORTCUT"
+echo "   (same for 'ShipDesk voice typing' with Ctrl+Alt+V)"
 
 if [[ "${1:-}" == "--uinput" ]]; then
   echo "==> Allowing your user to create a virtual pointer (needs sudo)"

@@ -20,6 +20,9 @@ so the next press brings you straight back to where you stood.
 If Ctrl+Alt+B does nothing after installing, log out and back in, or set it by hand:
 System Settings > Shortcuts > Add New > Application > "ShipDesk toggle".
 
+ShipDesk opens by itself when you log in. To stop that, set `"start_on_login": false` in
+`~/.config/shipdesk/config.json` and start it once more.
+
 ## What is where
 
 - **Library** (the racks beside the core): the folder you are in. Loose files sit on the first
@@ -27,8 +30,10 @@ System Settings > Shortcuts > Add New > Application > "ShipDesk toggle".
   type (documents blue, images green, video purple, audio orange, code teal, archives brown,
   3D pink). Look at a sign and press E to walk into that folder. The kiosk in front has
   UP, HOME and NEXT (more racks when a folder has over 20 sections).
-- **App stations** (along the big window): ten floating app logos. E opens the app, F swaps
-  the station to a different app.
+- **App stations** (along the big window): the apps pinned to your KDE taskbar, in the same
+  order, as floating logos (up to ten). E opens one. Pin or unpin apps on the taskbar and the
+  stations follow the next time ShipDesk starts. To pick them by hand instead, set
+  `"stations": "custom"` in the config file; then F on a station swaps its app.
 - **Core consoles** (around the glowing core) or Tab: the full list of installed apps.
 - Opening a file or app drops you to the normal 2D desktop with that window in front.
 
@@ -37,9 +42,10 @@ System Settings > Shortcuts > Add New > Application > "ShipDesk toggle".
 | Action | Keyboard / mouse | PS5 controller |
 |---|---|---|
 | Walk / look | WASD / mouse | left stick / right stick |
-| Run / jump | Shift / Space | L3 / R1 |
+| Sprint | hold Shift | hold L2, or click L3 |
+| Jump | Space | R1 |
 | Open what you look at | E | Cross |
-| Pick up or throw a book, change a station's app | F | Square |
+| Pick up or throw a book | F | Square |
 | Put a thrown book back on its shelf | R | |
 | Up one folder (in the library) | Q | Circle |
 | All apps | Tab | Triangle |
@@ -49,6 +55,20 @@ System Settings > Shortcuts > Add New > Application > "ShipDesk toggle".
 On the 2D desktop the controller becomes a mouse: left stick pointer (hold R2 for slow),
 Cross click, Circle right click, right stick scroll, D-pad arrows, Square Enter, Triangle Esc,
 R1 Tab, **PS button back to the ship**.
+
+## Voice typing
+
+On the 2D desktop, click where you want to type, then **hold L1 and speak**; let go and the
+words are typed. From the keyboard, **Ctrl+Alt+V** starts and Ctrl+Alt+V again stops. ShipDesk
+has to be running (minimised is fine).
+
+- It listens on your default microphone. To speak into the controller, pick the DualSense
+  microphone under System Settings > Sound.
+- Speech is recognised on your own computer. The first use downloads the speech engine and
+  model (a few hundred MB), so the first sentence takes a few minutes.
+- It types by pasting (Ctrl+V). On Wayland that needs `./install.sh --uinput`; without it the
+  text is copied and you press Ctrl+V yourself. In a terminal, paste is Ctrl+Shift+V.
+- `voice_model` (tiny / base / small) and `voice_language` are in the config file.
 
 Books you throw stay where they land, and your position, folder and stations are remembered.
 

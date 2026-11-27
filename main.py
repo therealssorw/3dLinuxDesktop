@@ -40,7 +40,7 @@ from direct.gui.OnscreenText import OnscreenText
 from panda3d.bullet import (BulletWorld, BulletTriangleMesh, BulletTriangleMeshShape, BulletRigidBodyNode,
                             BulletPlaneShape, BulletCapsuleShape, BulletCharacterControllerNode,
                             BulletBoxShape, ZUp)
-import desktop, padmouse
+import desktop, padmouse, voice
 
 HOME = os.path.expanduser("~")
 CONF_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "shipdesk")
@@ -54,7 +54,11 @@ DEFAULT_CONF = {
     "stick_look_speed": 150.0,    # degrees per second
     "invert_y": False,
     "walk_speed": 4.2,
-    "run_speed": 8.0,
+    "run_speed": 9.5,             # sprint speed
+    "start_on_login": True,
+    "stations": "taskbar",        # "taskbar" = the apps pinned to your KDE panel; "custom" = pick each one with F
+    "voice_model": "base",        # speech model: tiny, base, small (bigger = slower, more accurate)
+    "voice_language": "",         # "" = work it out; or a code like "en" or "ja"       # open ShipDesk automatically when you log in to KDE
     "minimize_on_open": True,     # drop to the normal desktop when you open something
     "pointer_speed": 1100.0,      # controller pointer speed on the 2D desktop, px/s
     "volume": 0.8,
@@ -62,7 +66,8 @@ DEFAULT_CONF = {
     # controller buttons (Panda3D names). On a DualSense: face_a=Cross, face_b=Circle,
     # face_x=Triangle, face_y=Square. Swap face_x/face_y here if yours come out reversed.
     "pad": {"interact": "face_a", "back": "face_b", "grab": "face_y", "apps": "face_x",
-            "jump": "rshoulder", "run": "lstick", "desktop": "start", "ship": "guide"},
+            "jump": "rshoulder", "run": "lstick", "desktop": "start", "ship": "guide",
+            "voice": "lshoulder"},
 }
 
 CAT_COLORS = {  # book colours by kind of file
@@ -171,7 +176,7 @@ class ShipDesk(ShowBase):
         self.disableMouse()
         self.setBackgroundColor(0.004, 0.006, 0.015)
         self.render.setAntialias(AntialiasAttrib.MMultisample)
-        self.camLens.setFov(78)
+        self.camLens.setFov(78); self.fov = 78.0
         self.camLens.setNearFar(0.08, 5000)
 
         self.mode = "ship"            # ship | menu | desktop
@@ -221,6 +226,10 @@ class ShipDesk(ShowBase):
         self.buttonThrowers[0].node().setKeystrokeEvent("keystroke")
         self.accept("keystroke", self.on_keystroke)
         signal.signal(signal.SIGUSR1, lambda *_: setattr(self, "toggle_flag", True))
+        self.voice = voice.Voice(self.conf)
+        self.voice_flag = False
+        self.voice_held = False
+        signal.signal(signal.SIGUSR2, lambda *_: setattr(self, "voice_flag", True))
         signal.signal(signal.SIGTERM, lambda *_: setattr(self, "quit_flag", True))
         self.quit_flag = False
         try:
@@ -229,11 +238,32 @@ class ShipDesk(ShowBase):
         except Exception:
             pass
 
+        self.sync_autostart()
         self.grab_mouse(True)
         self.taskMgr.add(self.update, "update")
         self.toast("Welcome aboard.  H shows the controls.", 6)
         if self.selftest:
             self.run_selftest()
+
+    def sync_autostart(self):
+        """Keep the 'start when I log in' entry in step with the start_on_login setting."""
+        if self.selftest:
+            return
+        path = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.join(HOME, ".config")), "autostart", "shipdesk.desktop")
+        launcher = os.path.join(HOME, ".local", "bin", "shipdesk")
+        try:
+            if self.conf.get("start_on_login", True) and os.path.exists(launcher):
+                want = ("[Desktop Entry]\nType=Application\nName=ShipDesk\nComment=Start in the ship\n"
+                        f"Exec={launcher}\nIcon=applications-games\nTerminal=false\nX-KDE-autostart-after=panel\n")
+                have = open(path, encoding="utf-8").read() if os.path.exists(path) else None
+                if have != want:
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(want)
+            elif not self.conf.get("start_on_login", True) and os.path.exists(path):
+                os.remove(path)
+        except OSError as e:
+            print("ShipDesk: could not update the autostart entry:", e, flush=True)
 
     # ------------------------------------------------------------ world
     def find_font(self):
@@ -342,6 +372,17 @@ class ShipDesk(ShowBase):
     def build_pods(self):
         slots = self.markers["winscreens"]
         pins = [p for p in self.state.get("pins", []) if p is None or p in self.apps_by_id]
+        self.taskbar_mode = False
+        if self.conf.get("stations", "taskbar") == "taskbar":
+            bar = desktop.taskbar_apps()
+            if bar:
+                self.taskbar_mode = True
+                for a in bar:
+                    self.apps_by_id.setdefault(a.id, a)
+                ids = [a.id for a in bar[:len(slots)]]
+                lead = (len(slots) - len(ids)) // 2          # keep a short row centred on the window
+                pins = [None] * lead + ids + [None] * (len(slots) - len(ids) - lead)
+                self.state["pins"] = pins
         if len(pins) != len(slots):
             pins = desktop.default_pins(self.apps, len(slots))
             pins += [None] * (len(slots) - len(pins))
@@ -378,6 +419,8 @@ class ShipDesk(ShowBase):
             hint = "open"
         else:
             name = "empty station"; hint = None
+            if getattr(self, "taskbar_mode", False):
+                pod["root"].hide(); pod["base"].hide()
         fm = CardMaker("frame"); fm.setFrame(-0.52, 0.52, -0.52, 0.52)
         frame = pod["root"].attachNewNode(fm.generate()); frame.setY(0.03); frame.setTwoSided(True)
         frame.setTransparency(TransparencyAttrib.MAlpha); frame.setColor(tint[0], tint[1], tint[2], 0.22 if app else 0.08)
@@ -385,6 +428,8 @@ class ShipDesk(ShowBase):
         pod["base"].setColor(min(1, tint[0] + 0.15), min(1, tint[1] + 0.15), min(1, tint[2] + 0.15), 1)
         label = self.text3d(name if len(name) < 22 else name[:20] + "…", 0.13, parent=self.unlit_root, billboard=False)
         label.setPos(pod["root"].getX(), 29.1, 1.02)
+        if not app and getattr(self, "taskbar_mode", False):
+            label.hide(); pod["item"]["reach"] = 0
         pod["label"] = label
         pod["item"]["label"] = name
         pod["item"]["hint"] = hint
@@ -586,7 +631,7 @@ class ShipDesk(ShowBase):
         self.hud_toast = text((0, 0.82), 0.05, fg=(1, 0.95, 0.8, 1))
         self.hud_help = text((-1.72, 0.9), 0.04, TextNode.ALeft)
         self.help_on = False
-        self.help_text = ("WASD / left stick   walk          Shift / L3   run          Space / R1   jump\n"
+        self.help_text = ("WASD / left stick   walk          hold Shift or L2 (or click L3)   sprint          Space / R1   jump\n"
                           "Mouse / right stick   look\n"
                           "E / Cross   open the book, app or folder you are looking at\n"
                           "F / Square   pick up or throw a book  -  on an app station: change the app\n"
@@ -595,7 +640,8 @@ class ShipDesk(ShowBase):
                           "Tab / Triangle   all apps\n"
                           "Esc / Options   normal 2D desktop (Ctrl+Alt+B from anywhere)        F10   quit\n"
                           "On the 2D desktop: left stick pointer, Cross click, Circle right click,\n"
-                          "right stick scroll, D-pad arrows, Square Enter, Triangle Esc, PS button back to the ship")
+                          "right stick scroll, D-pad arrows, Square Enter, Triangle Esc, PS button back to the ship\n"
+                          "Voice typing on the 2D desktop: hold L1 and speak, or press Ctrl+Alt+V to start and stop")
 
     def toast(self, msg, secs=3.5):
         self.hud_toast.setText(msg); self.toast_until = time.time() + secs
@@ -773,10 +819,8 @@ class ShipDesk(ShowBase):
         if "ambient" in self.sfx: self.sfx["ambient"].stop()
         if minimize and not self.selftest:
             props = WindowProperties(); props.setMinimized(True); self.win.requestProperties(props)
-        if self.mouse_backend is None and not self.mouse_errors and self.pad:
-            self.mouse_backend, self.mouse_errors = padmouse.open_backend()
-            if self.mouse_backend is None:
-                print("ShipDesk: controller pointer unavailable ->", "; ".join(self.mouse_errors), flush=True)
+        if self.pad:
+            self.ensure_backend()
 
     def go_ship(self, from_event=False):
         self.mode = "ship"
@@ -870,6 +914,8 @@ class ShipDesk(ShowBase):
             hint = "E open    F pick up" + ("    R reshelve" if k == "loose" else "")
             return f"{it['label']}   ({size:.0f} {unit})", hint
         if k == "app":
+            if self.taskbar_mode:
+                return it["label"], "E open"
             return it["label"], ("E open    F change app" if it["hint"] else "F choose an app")
         return it["label"], "E " + it["hint"]
 
@@ -880,7 +926,7 @@ class ShipDesk(ShowBase):
         elif k == "app":
             app = self.apps_by_id.get(self.state["pins"][it["data"]["i"]] or "")
             if app: self.launch(app)
-            else: self.open_menu(it["data"]["i"])
+            elif not self.taskbar_mode: self.open_menu(it["data"]["i"])
         elif k == "console": self.open_menu(None)
         elif k == "lib_up": self.folder_up()
         elif k == "lib_home": self.enter_folder(os.path.expanduser(self.conf["library_root"]))
@@ -896,7 +942,11 @@ class ShipDesk(ShowBase):
         if it is None:
             return
         if it["kind"] == "app":
-            self.open_menu(it["data"]["i"]); return
+            if self.taskbar_mode:
+                self.toast("These stations follow your KDE taskbar. Pin or unpin apps there."); self.play("deny")
+            else:
+                self.open_menu(it["data"]["i"])
+            return
         if it["kind"] not in ("book", "loose"):
             return
         d = it["data"]
@@ -935,6 +985,7 @@ class ShipDesk(ShowBase):
             self.toggle_flag = False
             if self.mode == "desktop": self.go_ship()
             else: self.go_desktop()
+        self.update_voice()
         if self.toast_until and time.time() > self.toast_until:
             self.hud_toast.setText(""); self.toast_until = 0
         if self.mode == "desktop":
@@ -978,8 +1029,11 @@ class ShipDesk(ShowBase):
         if mag > 1: mx, my = mx / mag, my / mag
         if self.pad_hit(c["pad"]["run"]): self.run_toggle = not getattr(self, "run_toggle", False)
         if mag < 0.1: self.run_toggle = False
-        running = self.key_down("shift") or getattr(self, "run_toggle", False)
+        running = mag > 0.1 and (self.key_down("shift") or self.key_down("lshift") or self.key_down("rshift")
+                                 or self.axis("left_trigger") > 0.4 or getattr(self, "run_toggle", False))
         speed = c["run_speed"] if running else c["walk_speed"]
+        self.fov += ((90.0 if running else 78.0) - self.fov) * min(1.0, dt * 8)
+        self.camLens.setFov(self.fov)
         self.char.setLinearMovement(Vec3(mx * speed, my * speed, 0), True)
         if self.act("jump", "space") and self.char.isOnGround():
             self.char.doJump()
@@ -1055,7 +1109,7 @@ class ShipDesk(ShowBase):
                                     ("face_y", "key", "enter"), ("face_x", "key", "esc"),
                                     ("dpad_up", "key", "up"), ("dpad_down", "key", "down"),
                                     ("dpad_left", "key", "left"), ("dpad_right", "key", "right"),
-                                    ("rshoulder", "key", "tab"), ("lshoulder", "key", "backspace")):
+                                    ("rshoulder", "key", "tab")):
                 now = self.pad_down(btn); was = self.pad_prev.get("2d_" + btn, False)
                 if now != was:
                     self.pad_prev["2d_" + btn] = now
@@ -1063,6 +1117,62 @@ class ShipDesk(ShowBase):
         except Exception as e:
             print("ShipDesk: controller pointer stopped:", e, flush=True)
             self.mouse_backend = None; self.mouse_errors = [str(e)]
+
+    # ------------------------------------------------------------ voice typing
+    def ensure_backend(self):
+        if self.mouse_backend is None and not self.mouse_errors:
+            self.mouse_backend, self.mouse_errors = padmouse.open_backend()
+            if self.mouse_backend is None:
+                print("ShipDesk: cannot send keys or pointer moves ->", "; ".join(self.mouse_errors), flush=True)
+        return self.mouse_backend
+
+    def update_voice(self):
+        v = self.voice
+        want = None
+        if self.voice_flag:                       # keyboard shortcut: press to start, press to stop
+            self.voice_flag = False
+            want = v.state != "recording"
+        btn = self.conf["pad"].get("voice")
+        if btn and self.mode == "desktop":        # controller: hold to talk
+            held = self.pad_down(btn)
+            if held != self.voice_held:
+                self.voice_held = held; want = held
+        if want is True and v.state == "idle":
+            if v.start(): self.play("grab")
+            else: self.play("deny")
+        elif want is False and v.state == "recording":
+            v.stop(); self.play("focus")
+        res = v.poll()
+        if res:
+            kind, text = res
+            if kind == "error":
+                if text: voice.notify(text)
+                self.play("deny")
+            elif not text:
+                voice.notify("Didn't catch anything."); self.play("deny")
+            else:
+                print(f"ShipDesk voice: heard {len(text)} characters", flush=True)
+                self.type_text(text)
+
+    def type_text(self, text):
+        if self.mode != "desktop":
+            self.toast("Heard: " + text[:80]); voice.set_clipboard(text); self.play("open"); return
+        ok = voice.set_clipboard(text + " ")
+        mb = self.ensure_backend()
+        if ok and mb:
+            def paste(task):
+                try:
+                    mb.key("ctrl", True); mb.key("v", True); mb.key("v", False); mb.key("ctrl", False)
+                except Exception as e:
+                    voice.notify(f"Copied, but could not paste: {e}. Press Ctrl+V.")
+                return task.done
+            self.taskMgr.doMethodLater(0.2, paste, "voice-paste")
+            self.play("open")
+        elif ok:
+            voice.notify("Copied what you said. Press Ctrl+V to paste it. (Run install.sh --uinput so it types by itself.)", 5000)
+            self.play("open")
+        else:
+            voice.notify("Heard: " + text + "  (no clipboard tool found to paste it)", 6000); self.play("deny")
 
     # ------------------------------------------------------------ saving / quitting
     def save(self):
