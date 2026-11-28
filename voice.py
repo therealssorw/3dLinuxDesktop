@@ -11,15 +11,18 @@ RUNTIME = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
 WAV = os.path.join(RUNTIME, "shipdesk-voice.wav")
 
 
-def notify(msg, ms=2500):
-    exe = shutil.which("notify-send")
-    if exe:
-        try:
-            subprocess.Popen([exe, "-a", "ShipDesk", "-t", str(ms), "ShipDesk voice typing", msg],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
-    print("ShipDesk voice:", msg, flush=True)
+def notify(msg, ms=2500, title="ShipDesk voice typing"):
+    """Desktop notification, so messages are seen even while the ship is minimised."""
+    print(f"{title}: {msg}", flush=True)
+    for exe, args in (("notify-send", ["-a", "ShipDesk", "-t", str(ms), title, msg]),
+                      ("kdialog", ["--title", title, "--passivepopup", msg, str(max(2, ms // 1000))])):
+        path = shutil.which(exe)
+        if path:
+            try:
+                subprocess.Popen([path] + args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+            except Exception:
+                pass
 
 
 def recorder_command(path):

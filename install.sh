@@ -32,6 +32,19 @@ echo "==> Setting up its Python environment (downloads the 3D engine the first t
 "$VENV/bin/python" -m pip install --quiet cairosvg python-xlib || echo "   (optional extras failed to install; SVG logos or X11 pointer control may be limited)"
 cp "$SRC/requirements.txt" "$DATA/requirements.stamp"
 
+echo "==> Setting up voice typing (speech engine and model, a few hundred MB the first time)"
+if "$VENV/bin/python" -m pip install --quiet faster-whisper; then
+  "$VENV/bin/python" - <<'PY' || echo "   (the speech model could not be downloaded now; it will be fetched on first use)"
+from faster_whisper import WhisperModel
+WhisperModel("base", device="cpu", compute_type="int8")
+print("   speech model ready")
+PY
+else
+  echo "   (the speech engine could not be installed; voice typing will not work. Run: shipdesk --doctor)"
+fi
+command -v pw-record >/dev/null || command -v arecord >/dev/null || command -v parecord >/dev/null || \
+  echo "   No recorder found: run  sudo apt install pipewire-bin alsa-utils"
+
 cat > "$BIN/shipdesk" <<LAUNCH
 #!/bin/sh
 # Starts ShipDesk from $SRC, pulling the newest version from GitHub first.

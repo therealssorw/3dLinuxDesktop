@@ -121,12 +121,44 @@ def open_file(path):
     return _spawn([opener, path])
 
 
+_spawn_count = 0
+
+
 def _spawn(args):
+    """Start a program detached from ShipDesk. Its error output goes to a small file (proc.errpath)."""
+    global _spawn_count
     env = dict(os.environ)
-    for k in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"):
+    for k in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "DESKTOP_STARTUP_ID", "XDG_ACTIVATION_TOKEN"):
         env.pop(k, None)
-    return subprocess.Popen(args, cwd=HOME, env=env, start_new_session=True,
-                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _spawn_count += 1
+    errpath = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"shipdesk-launch-{_spawn_count % 8}.log")
+    err = open(errpath, "wb")
+    try:
+        proc = subprocess.Popen(args, cwd=HOME, env=env, start_new_session=True,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
+    finally:
+        err.close()
+    proc.errpath = errpath
+    proc.args_used = args
+    print("ShipDesk: started", " ".join(args), flush=True)
+    return proc
+
+
+def launch_fallbacks(app):
+    """Other ways to start an app if running its command directly failed."""
+    out = []
+    if shutil.which("gtk-launch"):
+        out.append(["gtk-launch", app.id])
+    for k in ("kioclient", "kioclient6", "kioclient5"):
+        if shutil.which(k):
+            out.append([k, "exec", app.path]); break
+    if shutil.which("kstart"):
+        out.append(["kstart", "--application", app.id])
+    return out
+
+
+def spawn(args):
+    return _spawn(args)
 
 
 # ---------------------------------------------------------------- icons

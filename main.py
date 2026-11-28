@@ -4,7 +4,7 @@
 Files are books in the library racks, folders are rack sections, apps are stations
 along the big window. Opening anything drops you to the normal 2D desktop.
 """
-import os, sys, json, math, time, signal, hashlib, argparse, colorsys, shutil, subprocess, traceback
+import os, sys, re, json, math, time, shlex, signal, hashlib, argparse, colorsys, shutil, subprocess, traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -38,9 +38,10 @@ def _start_log():
 ap = argparse.ArgumentParser()
 ap.add_argument("--windowed", action="store_true", help="run in a window instead of fullscreen")
 ap.add_argument("--selftest", metavar="DIR", help="render test screenshots into DIR and exit")
+ap.add_argument("--doctor", action="store_true", help="print a health report to paste when something is not working")
 ap.add_argument("--restore-panel", action="store_true", help="put the KDE panel back the way it was and exit")
 ARGS = ap.parse_args()
-if not ARGS.selftest and not ARGS.restore_panel:
+if not ARGS.selftest and not ARGS.restore_panel and not ARGS.doctor:
     _start_log()
 
 loadPrcFileData("", """
@@ -273,6 +274,8 @@ class ShipDesk(ShowBase):
         self.accept("f10", self.quit)
         self.buttonThrowers[0].node().setKeystrokeEvent("keystroke")
         self.accept("keystroke", self.on_keystroke)
+        for ev in ("mouse1", "mouse3", "enter", "space", "escape"):
+            self.accept(ev, self.on_real_input)
         signal.signal(signal.SIGUSR1, lambda *_: setattr(self, "toggle_flag", True))
         self.voice = voice.Voice(self.conf)
         self.voice_flag = False
@@ -724,7 +727,7 @@ class ShipDesk(ShowBase):
                           "Esc / Options   normal 2D desktop (Ctrl+Alt+B from anywhere)        F10   quit\n"
                           "On the 2D desktop: left stick pointer, Cross click, Circle right click,\n"
                           "right stick scroll, D-pad arrows, Square Enter, Triangle Esc, PS button back to the ship\n"
-                          "Voice typing on the 2D desktop: hold L1 and speak, or press Ctrl+Alt+V to start and stop")
+                          "Voice typing: hold L1 and speak (in the ship, hold V to try it); Ctrl+Alt+V starts and stops it anywhere")
 
     def toast(self, msg, secs=3.5):
         self.hud_toast.setText(msg); self.toast_until = time.time() + secs
@@ -804,6 +807,8 @@ class ShipDesk(ShowBase):
             self.refresh_menu()
 
     def on_keystroke(self, ch):
+        if self.mode == "desktop":
+            self.on_real_input(); return
         if self.mode != "menu" or not ch.isalnum():
             return
         ch = ch.lower()
@@ -918,22 +923,44 @@ class ShipDesk(ShowBase):
         self.char.setLinearMovement(Vec3(0, 0, 0), True)
         self.grab_mouse(False); self.save()
         if "ambient" in self.sfx: self.sfx["ambient"].stop()
-        if minimize and not self.selftest:
-            props = WindowProperties(); props.setMinimized(True); self.win.requestProperties(props)
+        self.hud_focus.setText(""); self.hud_hint.setText("")
+        self.hud_toast.setText("Paused.  Click here, or press Ctrl+Alt+B, to come back to the ship."); self.toast_until = 0
+        if not self.selftest:
+            props = WindowProperties()
+            if minimize:
+                props.setMinimized(True)
+                props.setZOrder(WindowProperties.Z_bottom)     # if minimising is refused, at least sit behind other windows
+            self.win.requestProperties(props)
+            # stop drawing while we are out of the way (also avoids stalling on a hidden window)
+            self.taskMgr.doMethodLater(0.2, self.pause_drawing, "pause-drawing")
         if self.pad:
             self.ensure_backend()
 
+    def pause_drawing(self, task=None):
+        if self.mode == "desktop":
+            self.win.setActive(False)
+        return None
+
     def go_ship(self, from_event=False):
-        self.mode = "ship"
+        self.mode = "ship"; self.ship_since = time.time()
+        self.win.setActive(True)
+        self.hud_toast.setText("")
+        props = WindowProperties(); props.setMinimized(False); props.setZOrder(WindowProperties.Z_normal)
         if not from_event:
-            props = WindowProperties(); props.setMinimized(False); props.setForeground(True)
-            self.win.requestProperties(props)
+            props.setForeground(True)
+        self.win.requestProperties(props)
+        if not from_event:
             self.raise_window()
         self.grab_mouse(True)
         if "ambient" in self.sfx: self.sfx["ambient"].play()
         self.play("dock")
         for b in list(self.pad_prev): self.pad_prev[b] = True
         for k in list(self.key_prev): self.key_prev[k] = True
+
+    def on_real_input(self, *_):
+        """A click or key press that reached the ship's window while paused: the user is back."""
+        if self.mode == "desktop" and not self.selftest and time.time() - self.desktop_since > 1.0:
+            self.go_ship(from_event=True)
 
     def raise_window(self):
         """Ask the window manager to bring the ship back in front (helps on Wayland)."""
@@ -956,31 +983,65 @@ class ShipDesk(ShowBase):
         if not p.getOpen():
             self.quit(); return
         now = time.time()
-        if self.mode == "desktop":
-            if p.getForeground() and not p.getMinimized() and now - self.desktop_since > 1.0:
-                self.go_ship(from_event=True)
-        elif not p.getForeground() and now - self.started > 3.0:
+        # Leaving is automatic (so the mouse is never held by a window you are not looking at).
+        # Coming back is only ever on purpose: Ctrl+Alt+B, the PS button, or a click/key in the ship.
+        if self.mode != "desktop" and not p.getForeground() and now - self.started > 3.0 \
+                and now - getattr(self, "ship_since", 0) > 1.5:
             self.go_desktop(minimize=False)
 
     def launch(self, app):
-        try:
-            desktop.launch_app(app)
-        except Exception as e:
-            self.toast(f"Could not start {app.name}: {e}"); self.play("deny"); return
         self.play("open"); self.toast(f"Opening {app.name}…")
-        if self.conf["minimize_on_open"]:
-            self.taskMgr.doMethodLater(0.5, lambda t: self.go_desktop(), "to-desktop")
+        self.start_after_minimise(lambda: desktop.launch_app(app), app.name, desktop.launch_fallbacks(app))
 
     def open_path(self, path):
         if not os.path.exists(path):
             self.toast("That file is gone."); self.play("deny"); return
-        try:
-            desktop.open_file(path)
-        except Exception as e:
-            self.toast(f"Could not open it: {e}"); self.play("deny"); return
         self.play("open"); self.toast(f"Opening {os.path.basename(path)}…")
-        if self.conf["minimize_on_open"]:
-            self.taskMgr.doMethodLater(0.5, lambda t: self.go_desktop(), "to-desktop")
+        self.start_after_minimise(lambda: desktop.open_file(path), os.path.basename(path), [])
+
+    def start_after_minimise(self, starter, name, fallbacks):
+        """Start the program right away, get the ship out of the way, then check it really started."""
+        def fail(msg):
+            print(f"ShipDesk: could not start {name}: {msg}", flush=True)
+            voice.notify(f"Could not start {name}: {msg}", 6000, title="ShipDesk")
+            self.toast(f"Could not start {name}: {msg}", 8); self.play("deny")
+
+        def begin(task):
+            try:
+                proc = starter()
+            except Exception as e:
+                return try_next(str(e))
+            self.taskMgr.doMethodLater(2.5, lambda t: check(proc), "launch-check")
+            return None
+
+        def check(proc):
+            rc = proc.poll()
+            if rc in (None, 0):
+                return None
+            tail = ""
+            try:
+                lines = open(proc.errpath, errors="replace").read().strip().splitlines()
+                tail = lines[-1][:160] if lines else ""
+            except OSError:
+                pass
+            print(f"ShipDesk: {name} exited with code {rc}: {tail}", flush=True)
+            return try_next(tail or f"it exited with code {rc}")
+
+        def try_next(reason):
+            while fallbacks:
+                args = fallbacks.pop(0)
+                try:
+                    proc = desktop.spawn(args)
+                except Exception as e:
+                    reason = str(e); continue
+                self.taskMgr.doMethodLater(2.5, lambda t: check(proc), "launch-check")
+                return None
+            fail(reason)
+            return None
+
+        begin(None)
+        if self.conf["minimize_on_open"] and self.mode != "desktop":
+            self.taskMgr.doMethodLater(0.4, lambda t: self.go_desktop(), "to-desktop")
 
     # ------------------------------------------------------------ interaction
     def find_focus(self):
@@ -1108,7 +1169,7 @@ class ShipDesk(ShowBase):
             if self.mode == "desktop": self.go_ship()
             else: self.go_desktop()
         self.update_voice()
-        if self.toast_until and time.time() > self.toast_until:
+        if self.toast_until and time.time() > self.toast_until and self.mode != "desktop":
             self.hud_toast.setText(""); self.toast_until = 0
         if self.mode == "desktop":
             self.update_desktop(dt)
@@ -1135,10 +1196,11 @@ class ShipDesk(ShowBase):
             cx, cy = self.win.getXSize() // 2, self.win.getYSize() // 2
             if getattr(self, "skip_mouse", 0) > 0:
                 self.skip_mouse -= 1
+                self.win.movePointer(0, cx, cy)
             elif md.getInWindow():
                 self.heading -= (md.getX() - cx) * c["mouse_sensitivity"]
                 self.pitch -= (md.getY() - cy) * c["mouse_sensitivity"] * (-1 if c["invert_y"] else 1)
-            self.win.movePointer(0, cx, cy)
+                self.win.movePointer(0, cx, cy)
         rx, ry = self.axis("right_x"), self.axis("right_y")
         self.heading -= rx * abs(rx) * c["stick_look_speed"] * dt
         self.pitch += ry * abs(ry) * c["stick_look_speed"] * 0.7 * dt * (-1 if c["invert_y"] else 1)
@@ -1280,30 +1342,36 @@ class ShipDesk(ShowBase):
             self.voice_flag = False
             want = v.state != "recording"
         btn = self.conf["pad"].get("voice")
-        if btn and self.mode == "desktop":        # controller: hold to talk
-            held = self.pad_down(btn)
-            if held != self.voice_held:
-                self.voice_held = held; want = held
+        held = bool(btn and self.mode != "menu" and self.pad_down(btn))      # controller: hold to talk
+        if self.mode == "ship" and self.key_down("v"):                       # keyboard, inside the ship: hold V
+            held = True
+        if held != self.voice_held:
+            self.voice_held = held; want = held
         if want is True and v.state == "idle":
-            if v.start(): self.play("grab")
-            else: self.play("deny")
+            if v.start():
+                self.play("grab"); self.toast("Listening…  (let go when you are done)", 60)
+            else:
+                self.play("deny"); self.toast("Voice typing could not start recording. See the notification.", 6)
+        elif want is True and v.state == "busy":
+            self.toast("Still working on the last thing you said…", 3)
         elif want is False and v.state == "recording":
-            v.stop(); self.play("focus")
+            v.stop(); self.play("focus"); self.toast("Working out what you said…", 120)
         res = v.poll()
         if res:
             kind, text = res
             if kind == "error":
-                if text: voice.notify(text)
-                self.play("deny")
+                if text: voice.notify(text, 8000)
+                self.toast(text or "That was too short to hear.", 8); self.play("deny")
             elif not text:
-                voice.notify("Didn't catch anything."); self.play("deny")
+                voice.notify("Didn't catch anything."); self.toast("Didn't catch anything.", 4); self.play("deny")
             else:
                 print(f"ShipDesk voice: heard {len(text)} characters", flush=True)
                 self.type_text(text)
 
     def type_text(self, text):
         if self.mode != "desktop":
-            self.toast("Heard: " + text[:80]); voice.set_clipboard(text); self.play("open"); return
+            copied = voice.set_clipboard(text)
+            self.toast("Heard: " + text[:90] + ("   (copied)" if copied else ""), 8); self.play("open"); return
         ok = voice.set_clipboard(text + " ")
         mb = self.ensure_backend()
         if ok and mb:
@@ -1409,7 +1477,77 @@ class ShipDesk(ShowBase):
             self.taskMgr.doMethodLater(1.0 + i * 0.6, s, f"st{i}")
 
 
+def doctor():
+    """Health report: everything needed to work out why something is not working."""
+    def run(cmd, t=6):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=t)
+            return (r.stdout + r.stderr).strip()
+        except Exception as e:
+            return f"(failed: {e})"
+    def line(k, v): print(f"{k:22} {v}")
+    print("==== ShipDesk doctor ====")
+    line("version", run(["git", "-C", HERE, "log", "-1", "--format=%h %ad %s", "--date=short"]))
+    local = run(["git", "-C", HERE, "rev-parse", "HEAD"])
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    try:
+        remote = subprocess.run(["git", "-C", HERE, "ls-remote", "origin", "refs/heads/main"], capture_output=True, text=True, timeout=12, env=env)
+        rh = remote.stdout.split()[0] if remote.returncode == 0 and remote.stdout.split() else None
+        line("auto-update", "up to date" if rh == local else ("newer version waiting; restart ShipDesk" if rh else
+             "CANNOT reach the repo without a login -> run: gh auth login   (" + remote.stderr.strip()[:90] + ")"))
+    except Exception as e:
+        line("auto-update", f"could not check: {e}")
+    line("session", f"{os.environ.get('XDG_SESSION_TYPE')} / {os.environ.get('XDG_CURRENT_DESKTOP')} / {run(['plasmashell', '--version'])}")
+    line("python", sys.version.split()[0] + "  in venv: " + str(sys.prefix != sys.base_prefix))
+    try:
+        import panda3d; line("3D engine", getattr(panda3d, "__version__", "installed"))
+    except Exception as e:
+        line("3D engine", f"MISSING: {e}")
+    line("running", "yes" if os.path.exists(PID_FILE) and run(["sh", "-c", f"kill -0 $(cat {PID_FILE}) && echo up"]) == "up" else "no")
+    line("starts on login", os.path.exists(os.path.join(os.path.dirname(CONF_DIR), "autostart", "shipdesk.desktop")))
+    line("shortcuts", run(["sh", "-c", "grep -A3 -i shipdesk ~/.config/kglobalshortcutsrc | grep -E 'shipdesk|_launch' | tr '\n' ' '"]) or "none registered")
+    print("-- apps")
+    apps = desktop.list_apps(); line("installed apps", len(apps))
+    try:
+        bar = desktop.taskbar_apps()
+    except Exception as e:
+        bar = []; line("taskbar read", f"FAILED: {e}")
+    st = load_json(os.path.join(DATA_DIR, "state.json"), {})
+    for a in [x for x in (desktop.match_app(apps, "firefox"), desktop.match_app(apps, "konsole")) if x] + bar[:8]:
+        cmd = re.sub(r"%[a-zA-Z]", "", a.exe).strip()
+        first = (shlex.split(cmd) or ["?"])[0]
+        if first == "env":
+            first = next((t for t in shlex.split(cmd)[1:] if "=" not in t), "?")
+        line("  " + a.name[:20], f"{cmd[:60]}   -> {'found' if (shutil.which(first) or os.path.exists(first)) else 'COMMAND NOT FOUND'}")
+    line("pinned", st.get("extra_pins"))
+    print("-- voice typing")
+    rec = voice.recorder_command("x.wav"); line("recorder", rec[0] if rec else "NONE -> sudo apt install pipewire-bin alsa-utils")
+    line("microphone", run(["pactl", "get-default-source"]) or "(pactl not available)")
+    try:
+        import faster_whisper; line("speech engine", "installed " + getattr(faster_whisper, "__version__", ""))
+    except Exception as e:
+        line("speech engine", f"NOT INSTALLED ({e}) -> run install.sh again")
+    hub = os.path.expanduser("~/.cache/huggingface/hub")
+    line("speech model", ", ".join(d for d in os.listdir(hub) if "whisper" in d) if os.path.isdir(hub) else "not downloaded yet")
+    line("clipboard tool", next((t for t in ("qdbus6", "qdbus", "qdbus-qt6", "qdbus-qt5", "wl-copy", "xclip", "xsel") if shutil.which(t)), "NONE"))
+    line("notifications", next((t for t in ("notify-send", "kdialog") if shutil.which(t)), "NONE"))
+    mb, errs = padmouse.open_backend()
+    line("typing/pointer", mb.name if mb else "NOT AVAILABLE: " + "; ".join(errs) + "  -> run: ~/3dLinuxDesktop/install.sh --uinput")
+    if mb: mb.close()
+    print("-- controller")
+    line("devices", run(["sh", "-c", "ls /dev/input/by-id/ 2>/dev/null | grep -i -E 'joystick|event-joystick|sony|dualsense|wireless' | tr '\n' ' '"]) or "none seen")
+    for name in ("shipdesk.log", "shipdesk.log.old"):
+        p = os.path.join(DATA_DIR, name)
+        if os.path.exists(p):
+            print(f"-- last lines of {name}")
+            keep = [l for l in open(p, errors="replace").read().splitlines() if not l.startswith(("ALSA lib", "AL lib"))]
+            print("\n".join(keep[-40:]))
+    print("==== end ====")
+
+
 if __name__ == "__main__":
+    if ARGS.doctor:
+        doctor(); sys.exit(0)
     if ARGS.restore_panel:
         st = load_json(os.path.join(DATA_DIR, "state.json"), {})
         if restore_panel_modes(st.get("panel_modes")):

@@ -28,7 +28,7 @@ your window; move the pointer to the panel's edge to bring it up. Quitting ShipD
 the panel back. `shipdesk --restore-panel` does the same by hand, and
 `"hide_panel_on_desktop": false` in the config turns this off.
 
-If something goes wrong, the log is `~/.local/share/shipdesk/shipdesk.log`.
+If something goes wrong, run `shipdesk --doctor` and read (or send) what it prints.
 
 ## What is where
 
@@ -68,7 +68,8 @@ R1 Tab, **PS button back to the ship**.
 
 On the 2D desktop, click where you want to type, then **hold L1 and speak**; let go and the
 words are typed. From the keyboard, **Ctrl+Alt+V** starts and Ctrl+Alt+V again stops. ShipDesk
-has to be running (minimised is fine).
+has to be running (minimised is fine). To try it inside the ship, hold V (or L1) and speak:
+what it heard shows on screen and is copied.
 
 - It listens on your default microphone. To speak into the controller, pick the DualSense
   microphone under System Settings > Sound.
